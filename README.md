@@ -37,7 +37,7 @@ finds/identifies them, during index building.
 This enables `rsyncnow` to introduce a huge increase in efficiency on large
 data sets as follows:
 
-1. It runs a set of `rsync` processes (1 for every source path)
+1. It runs a set of `rsync` processes (by default 1 for every source path)
 that are finding the files to sync (in dry run mode) and printing them to
 STDOUT as a stream in real time.  We call these processes `finders`.
 
@@ -64,8 +64,9 @@ You need Ruby installed to run the script. Hopefully this is a trivial requireme
 Usage: rsyncnow [OPTIONS...] SRC... DST -- [FIND OPTIONS...] -- [SYNC OPTIONS...]
 
 OPTIONS:
-  -f, --finders 1    - Number of rsync find processes. Currently always gets
-                       reset to the number of specified SRC paths
+  -f, --finders N    - Max number of rsync find processes running at the same
+                       time. Each one processes one SRC path at a time. If not
+                       specified, defaults to the number of SRC paths
   -s, --syncers 1    - Nr. of respawning rsync sync/copy processes, per finder
   -b, --batchsize 5  - Nr. of files to collect in a batch before running syncers
   -q, --queuesize 50 - Max number of paths to queue for sync. If not specified,
@@ -162,11 +163,11 @@ Run `test/run.sh -h` for more information.
 
 ## Misc notes
 
-Currently there is always 1 rsync finder process that is started for each
-source directory, concurrently. If you don't want concurrent finders running
-at the same time (for example if all source directories to sync are on the
-same partition), you should call `rsyncnow` multiple times with 1 source path
-in every invocation instead of once with multiple source paths.
+By default, 1 rsync finder process is started for each source directory,
+concurrently. If you don't want that many finders running at the same time
+(for example if all source directories to sync are on the same partition),
+limit their number with option `-f`. Each finder then processes one source
+path after another; with `-f 1` only one source path is synced at a time.
 
 Rsyncnow doesn't put any restrictions on the rsync options that one can use in
 either find or sync phase (options related to comparing/finding files,

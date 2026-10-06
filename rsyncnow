@@ -2,11 +2,6 @@
 # frozen_string_literals: true
 require 'getoptlong'
 require 'open3'
-require 'timeout'
-
-# TODO:
-# - Ability to use --finders X with X less than number of source paths
-# - If finders finish, run sync immediately instead of waiting -t SECs
 
 #######################################################################
 # Usage/help and examples:
@@ -16,8 +11,9 @@ def usage
 Usage: #{$0} [OPTIONS...] SRC... DST -- [FIND OPTIONS...] -- [SYNC OPTIONS...]
 
 OPTIONS:
-  -f, --finders 1    - Number of rsync find processes. Currently always gets
-                       reset to the number of specified SRC paths
+  -f, --finders N    - Max number of rsync find processes running at the same
+                       time. Each one processes one SRC path at a time. If not
+                       specified, defaults to the number of SRC paths
   -s, --syncers 1    - Nr. of respawning rsync sync/copy processes, per finder
   -b, --batchsize 5  - Number of files to queue before starting a sync
   -q, --queuesize 50 - Max number of paths to queue for sync. If not specified,
@@ -72,7 +68,7 @@ end
 # Parse config:
 
 $C= {
-  finders: 1,
+  finders: nil,
   syncers: 1,
   batchsize: 5,
   queuesize: nil,
@@ -86,7 +82,6 @@ $C= {
   sync_options: %w/-lptgoD0e=ssh --files-from=-/,
   # Runtime variables (mostly accessed while holding a mutex):
   runtime: {
-    finders: 0,
     status: 0,
     synced: false,
   }
@@ -162,16 +157,12 @@ $C[:destination]= $C[:sources].pop
 # Queue size, if unspecified, defaults to 10 x batchsize
 $C[:queuesize]||= $C[:batchsize]* 10
 
-# If more parallelization is requested than possible, reduce the number
-# XXX currently always re-set to number of sources, because option
-# --files-from doesn't seem to work with more than 1 source.
-if $C[:finders]!= $C[:sources].size
+# Each finder processes one source at a time, so there is no use for more
+# finders than sources. That is also the default number of finders.
+if !$C[:finders] or $C[:finders]> $C[:sources].size
   $C[:finders]= $C[:sources].size
 end
-
-# How many source paths will each finder process (currently always 1
-# because of the above note)
-$C[:finder_batch_size]= ($C[:sources].size/$C[:finders].to_f).ceil
+$C[:finders]= 1 if $C[:finders]< 1
 
 if $C[:verbose]
   $C[:sync_options].unshift '-v'
@@ -285,14 +276,10 @@ end
 
 class Finder
   def initialize cmd, args, sources, dest
-    queue= Queue.new
-    threads= []
-
-    $mutex.synchronize {
-      $C[:runtime][:finders]+= 1
-    }
-
-    sources.each do |source|
+    # Sources are taken from the queue which is shared by all finders
+    while source= sources.pop
+      queue= Queue.new
+      threads= []
       root, name, prefix= split_source source
       cmdline= [cmd, args, $C[:find_options_always], source, dest].flatten
       v "Starting finder: %s" % [cmdline]
@@ -328,38 +315,53 @@ class Finder
         end
         check t.value
       }
+
+      # Closing the queue tells syncers that there will be no more paths
+      queue.close
+      threads.each &:join
     end
-
-    $mutex.synchronize {
-      $C[:runtime][:finders]-= 1
-    }
-
-    threads.each &:join
   end
 end
 
 class Syncer
+  # Returns the next path from the queue. Returns nil if there is none after
+  # waiting for timeout seconds, or as soon as queue is closed and empty.
+  # (Timeout::timeout isn't used because a path could get lost in a timeout)
+  def pop queue
+    time= Time.now
+    begin
+      queue.pop true
+    rescue ThreadError
+      return if (queue.closed? and queue.empty?) or Time.now- time>= $C[:timeout]
+      sleep 0.01
+      retry
+    end
+  end
+
   def initialize queue, cmd, args, source, dest
     cmdline= [cmd, args, source, dest].flatten
     v "Starting syncer: %s" % [cmdline]
 
-    loop do
+    done= false
+    until done
       list= []
       $C[:batchsize].times do |i|
-        begin
-          Timeout::timeout($C[:timeout]) {
-            list.push queue.pop
-          }
-        rescue Timeout::Error
+        if path= pop(queue)
+          list.push path
+        else
+          # If queue is closed and empty, there is no need to wait for more paths
+          done= (queue.closed? and queue.empty?)
           if list.size> 0
-            v 'Finder timeout reached for %s; running syncer with %d out of %d paths' % [source, list.size, $C[:batchsize]]
+            v 'Finder %s for %s; running syncer with %d out of %d paths' % [done ? 'done' : 'timeout reached', source, list.size, $C[:batchsize]]
           end
           break
         end
       end
 
       if list.size> 0
-        v 'Finder batch size reached for %s; running syncer with a batch of %d paths' % [source, $C[:batchsize]]
+        if list.size== $C[:batchsize]
+          v 'Finder batch size reached for %s; running syncer with a batch of %d paths' % [source, $C[:batchsize]]
+        end
         first_alone do
           read_io, write_io= IO.pipe
           child= fork do
@@ -373,8 +375,6 @@ class Syncer
           Process.wait child
           check $?
         end
-      else
-        break if $C[:runtime][:finders]== 0
       end
     end
 
@@ -388,10 +388,13 @@ end
 
 v "Config: #{$C}"
 
+sources= Queue.new
+$C[:sources].each {|source| sources<< source }
+sources.close
+
 threads= []
 $C[:finders].times do |i|
-  range= ($C[:finder_batch_size]*i)...($C[:finder_batch_size]*(i+1))
-  threads<< Thread.new { Finder.new $C[:rsync], $C[:find_options], $C[:sources][range], $C[:destination] }
+  threads<< Thread.new { Finder.new $C[:rsync], $C[:find_options], sources, $C[:destination] }
 end
 threads.each &:join
 

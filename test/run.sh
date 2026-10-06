@@ -132,6 +132,11 @@ O04|local|.|a/ nb|-b 1|
 O05|local|.|a/sub a/file1 nb|-b 1 -s 2|
 O06|local|.|a/ a2/ single/ lnk/ odd/ nb|-s 4 -b 1|
 O07|local|.|a a2 single lnk nb/|-s 2|
+O08|local|.|a/ a2/ single/ lnk/ odd/ b|-f 1|
+O09|local|.|a/ a2/ single/ lnk/ odd/ nb|-f 2 -s 2|
+O10|local|.|a a2 single nb|-f 1 -b 1|
+O11|local|.|a/ a2 b|-f 5|
+O12|local|.|a/file1 a2/other a/sub b|-f 2|
 R01|ssh|.|localhost:{R}/a/ b||
 R02|ssh|.|localhost:{R}/a b||
 R03|ssh|.|localhost:{R}/a/file1 b||
@@ -167,6 +172,8 @@ T08|ssh|.|a/file1 localhost:{R}/b/newname||
 T09|ssh|.|a/ a2 {U}@localhost:{R}/b||
 T10|ssh|.|a/ localhost:{R}/nb|-b 1|
 T11|ssh|.|a/ a2/ single/ lnk/ localhost:{R}/nb|-s 3 -b 1|
+T12|ssh|.|a a2/ single localhost:{R}/nb|-f 1|
+R25|ssh|.|localhost:{R}/a localhost:{R}/a2/ localhost:{R}/lnk b|-f 2|
 G01|daemon|.|rsync://localhost:$PORT/mod/{P}/a/ b|$DX|
 G02|daemon|.|rsync://localhost:$PORT/mod/{P}/a b|$DX|
 G03|daemon|.|localhost::mod/{P}/a/ b|-- -a --port=$PORT -- -lptgoD0 --port=$PORT --files-from=-|--port=$PORT
@@ -182,6 +189,7 @@ G12|daemon|.|rsync://localhost:$PORT/mod/{P}/a/sub/../ b|$DX|
 G13|daemon|.|a/ rsync://localhost:$PORT/mod/{P}/b|$DX|
 G14|daemon|.|a rsync://localhost:$PORT/mod/{P}/b|$DX|
 G15|daemon|.|single/ rsync://localhost:$PORT/mod/{P}/nb|$DX|
+G16|daemon|.|rsync://localhost:$PORT/mod/{P}/a rsync://localhost:$PORT/mod/{P}/a2/ rsync://localhost:$PORT/mod/{P}/single b|-f 1 $DX|
 EOF
 }
 
@@ -331,9 +339,49 @@ E08() {
   ruby $RSYNCNOW -h | grep -q '^Usage: ' && ruby $RSYNCNOW -e | grep -q '^EXAMPLES:'
 }
 
+# Syncing is done as soon as finder is done, without waiting for the timeout
+E09() {
+  mkdir -p v; echo 1 > v/file
+  SECONDS=0
+  ruby $RSYNCNOW -t 10 v/ dst9 > E09.log 2>&1 && [ -f dst9/file ] && [ $SECONDS -lt 5 ]
+}
+
+# Runs rsyncnow with options $1 on three sources, using a wrapper for rsync
+# which logs when each finder starts and ends. Prints that log in one line.
+finders_log() {
+  mkdir -p f1 f2 f3; echo 1 > f1/a; echo 2 > f2/b; echo 3 > f3/c
+  cat > rsync-wrapper <<EOF
+#!/bin/sh
+case " \$* " in *" --dry-run "*)
+  echo start >> $PWD/finders.log; rsync "\$@"; rc=\$?; sleep 0.5; echo end >> $PWD/finders.log; exit \$rc
+esac
+exec rsync "\$@"
+EOF
+  chmod +x rsync-wrapper; rm -f finders.log
+  ruby $RSYNCNOW -t 0.2 -r ./rsync-wrapper $1 f1/ f2/ f3/ fdst > finders.out 2>&1 || return 1
+  [ -f fdst/a ] && [ -f fdst/b ] && [ -f fdst/c ] || return 1
+  echo $(cat finders.log)
+}
+
+# Number of finders running at the same time is limited with option -f
+E10() {
+  [ "$(finders_log '-f 1')" = "start end start end start end" ]
+}
+
+E11() {
+  local log=$(finders_log '-f 2')
+  [[ $log == "start start end "* ]] && [ "$(echo $log | tr ' ' '\n' | grep -c start)" = 3 ]
+}
+
+# By default there is one finder for every source
+E12() {
+  [ "$(finders_log '')" = "start start start end end end" ]
+}
+
 extras="E01:More_files_than_queue_size E02:Nothing_to_do_when_synced E03:Changes_are_synced
   E04:Directory_into_new_DST E05:Verbose_mode E06:Exit_status_of_finder E07:Exit_status_of_syncer
-  E08:Help_and_examples"
+  E08:Help_and_examples E09:No_waiting_when_finder_is_done E10:One_finder_at_a_time
+  E11:Two_finders_at_a_time E12:One_finder_per_source_by_default"
 
 #######################################################################
 # Run the tests:
