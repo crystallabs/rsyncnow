@@ -137,6 +137,20 @@ O09|local|.|a/ a2/ single/ lnk/ odd/ nb|-f 2 -s 2|
 O10|local|.|a a2 single nb|-f 1 -b 1|
 O11|local|.|a/ a2 b|-f 5|
 O12|local|.|a/file1 a2/other a/sub b|-f 2|
+X01|local|.|a/ del|--delete|--delete
+X02|local|.|a/ del/|--delete -b 1|--delete
+X03|local|.|a named|--delete|--delete
+X04|local|.|a a2 named|--delete|--delete
+X05|local|.|odd/ delodd|--delete|--delete
+X06|local|.|rep/ repdst|--delete|--delete
+X07|local|.|a/ nb|--delete|--delete
+X08|local|.|a/file1 del|--delete|--delete
+X09|local|.|a/ del|--delete -s 3 -b 2 -q 3|--delete
+X10|local|.|{R}/a/ {R}/del|--delete|--delete
+X11|local|.|a/sub/ del|--delete|--delete
+X12|local|.|empty/ del|--delete|--delete
+X13|local|.|a/ synced|--delete|--delete
+X14|local|.|a/sub a/file1 named/a|--delete -f 1|--delete
 R01|ssh|.|localhost:{R}/a/ b||
 R02|ssh|.|localhost:{R}/a b||
 R03|ssh|.|localhost:{R}/a/file1 b||
@@ -174,6 +188,13 @@ T10|ssh|.|a/ localhost:{R}/nb|-b 1|
 T11|ssh|.|a/ a2/ single/ lnk/ localhost:{R}/nb|-s 3 -b 1|
 T12|ssh|.|a a2/ single localhost:{R}/nb|-f 1|
 R25|ssh|.|localhost:{R}/a localhost:{R}/a2/ localhost:{R}/lnk b|-f 2|
+X20|ssh|.|localhost:{R}/a/ del|--delete|--delete
+X21|ssh|.|a/ localhost:{R}/del|--delete|--delete
+X22|ssh|.|localhost:{R}/a localhost:{R}/a2 named|--delete|--delete
+X23|ssh|.|odd/ localhost:{R}/delodd|--delete|--delete
+X24|ssh|.|localhost:{R}/odd/ delodd|--delete -b 2|--delete
+X25|ssh|.|'localhost:~/{H}/' del|--delete|--delete
+X26|ssh|.|rep/ localhost:{R}/repdst|--delete|--delete
 G01|daemon|.|rsync://localhost:$PORT/mod/{P}/a/ b|$DX|
 G02|daemon|.|rsync://localhost:$PORT/mod/{P}/a b|$DX|
 G03|daemon|.|localhost::mod/{P}/a/ b|-- -a --port=$PORT -- -lptgoD0 --port=$PORT --files-from=-|--port=$PORT
@@ -190,6 +211,11 @@ G13|daemon|.|a/ rsync://localhost:$PORT/mod/{P}/b|$DX|
 G14|daemon|.|a rsync://localhost:$PORT/mod/{P}/b|$DX|
 G15|daemon|.|single/ rsync://localhost:$PORT/mod/{P}/nb|$DX|
 G16|daemon|.|rsync://localhost:$PORT/mod/{P}/a rsync://localhost:$PORT/mod/{P}/a2/ rsync://localhost:$PORT/mod/{P}/single b|-f 1 $DX|
+X30|daemon|.|rsync://localhost:$PORT/mod/{P}/a/ del|--delete $DX|--delete
+X31|daemon|.|a/ rsync://localhost:$PORT/mod/{P}/del|--delete $DX|--delete
+X32|daemon|.|rsync://localhost:$PORT/mod/{P}/a named|--delete $DX|--delete
+X33|daemon|.|rsync://localhost:$PORT/mod/{P}/odd/ delodd|--delete $DX|--delete
+X34|daemon|.|rsync://localhost:$PORT/one del|--delete $DX|--delete
 EOF
 }
 
@@ -210,6 +236,22 @@ setup() {
   done
   echo old-and-much-longer > $r/stale/file1; echo e > $r/stale/extra
   cp -a $r/a/. $r/synced/
+
+  # Destinations for testing of deletion. They contain files which don't
+  # exist in a (del, named/a) and odd (delodd), and also files which do.
+  mkdir -p $r/del/gonedir/deep $r/del/emptygone $r/named/a/gonedir $r/delodd/gonedir
+  cp -a $r/a/. $r/del/; cp -a $r/a/. $r/named/a/
+  echo x > $r/del/gone; echo x > $r/del/sub/gone2; echo x > $r/del/gonedir/deep/f
+  ln -s nowhere $r/del/gonelink; ln -s sub $r/del/gonedirlink
+  echo x > $r/named/a/gone; echo x > $r/named/a/gonedir/f; echo x > $r/named/stay
+  cp -a "$r/odd/q?" "$r/odd/x -> y" "$r/odd/back\slash" $r/delodd/
+  for f in 'g*ne' 'g?ne' '[g]one' 'back\gone' 'b\s*' 'lit\#012gone' $'new\ngone' ' gone' 'gone ' 'gonè' $'gon\351' 'gone -> x' '-gone' 'gonedir/g*'; do
+    echo x > "$r/delodd/$f"
+  done
+
+  # A file which replaces a directory, and a directory which replaces a file
+  mkdir -p $r/rep/f2d $r/repdst/d2f/inner
+  echo f > $r/rep/d2f; echo x > $r/rep/f2d/x; echo y > $r/repdst/d2f/inner/y; echo z > $r/repdst/f2d; echo g > $r/repdst/gone
 }
 
 # Prints the list of everything in directory $1 (with file sizes and checksums)
@@ -378,10 +420,30 @@ E12() {
   [ "$(finders_log '')" = "start start start end end end" ]
 }
 
+# Deleting more files than the queue can hold
+E13() {
+  local d f
+  big_tree; rsync -a src/ dst13
+  for d in $(seq 1 30); do
+    for f in $(seq 1 10); do echo x > dst13/d$d/gone$f; done
+    mkdir -p dst13/d$d/n1/gonedir/deep; echo x > dst13/d$d/n1/gonedir/deep/f
+  done
+  mkdir -p dst13/gonetop/x; echo x > dst13/gonetop/x/f; echo new > src/d3/new13
+  ruby $RSYNCNOW -t 0.2 --delete -s 2 -b 7 -q 20 src/ dst13 > E13.log 2>&1 && [ ! -s E13.log ] && [ -z "$(left src/ dst13)" ]
+}
+
+# Option --delete is refused if sources are synced into the same directory
+E14() {
+  mkdir -p m1 m2 mdst; echo 1 > m1/a; echo 2 > m2/b; echo x > mdst/stay
+  ruby $RSYNCNOW -t 0.2 --delete m1/ m2/ mdst > E14.log 2>&1
+  [ $? = 1 ] && grep -q 'Option --delete' E14.log && [ "$(ls mdst)" = stay ]
+}
+
 extras="E01:More_files_than_queue_size E02:Nothing_to_do_when_synced E03:Changes_are_synced
   E04:Directory_into_new_DST E05:Verbose_mode E06:Exit_status_of_finder E07:Exit_status_of_syncer
   E08:Help_and_examples E09:No_waiting_when_finder_is_done E10:One_finder_at_a_time
-  E11:Two_finders_at_a_time E12:One_finder_per_source_by_default"
+  E11:Two_finders_at_a_time E12:One_finder_per_source_by_default
+  E13:More_deletions_than_queue_size E14:Delete_with_sources_in_same_directory"
 
 #######################################################################
 # Run the tests:

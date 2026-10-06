@@ -75,6 +75,8 @@ OPTIONS:
                        limit and are resumed when queue falls below threshold
   -t, --timeout 5.0  - After timeout seconds, run rsync sync/copy process even
                        if a batch isn't full
+  -d, --delete       - Delete files from DST which don't exist in SRC (same
+                       as rsync option --delete)
 
   -r, --rsync rsync  - Name (and/or path) of rsync binary
 
@@ -149,8 +151,31 @@ Known differences:
 
 - When `SRC` is specified as `dir/`, attributes (modification time, permissions)
 of the top-level directory itself are not synced to `DST`
-- Deletions are not synced (rsync option `--delete` has no effect)
+- Files are deleted from `DST` only if `rsyncnow` option `--delete` is used (rsync
+option `--delete` in `FIND OPTIONS` or `SYNC OPTIONS` has no effect). See below
+for the differences in how it works.
 - Rsync option `-R` (`--relative`) can not be used
+
+## Deleting files
+
+With option `-d` (`--delete`), files which exist in `DST` but not in `SRC` are deleted
+from `DST`, like with rsync option `--delete`.
+
+Finders run with option `--delete` and so they also print the paths to delete. Those
+paths are queued separately, and deleted by an additional rsync process (1 per finder)
+which is given filter rules that allow only those specific paths to be deleted.
+
+Differences from rsync:
+
+- Files are deleted as they are found (as with `--delete-during`). Other variants
+(`--delete-before`, `--delete-after`, `--delete-delay`, `--delete-excluded`) are not
+supported.
+- If there are multiple `SRC` paths, they must be synced into different directories
+in `DST`. This is not the case if `SRC` ends with `/` (`rsyncnow --delete a/ b/ dst`),
+and `rsyncnow` refuses to run then. The reason is that each `SRC` has its own finder,
+which would delete the files synced from the other `SRC` paths.
+- Limits such as `--max-delete` (in `SYNC OPTIONS`) apply to each batch of paths, and
+not to the whole run.
 
 ## Testing
 

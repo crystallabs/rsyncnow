@@ -22,6 +22,8 @@ OPTIONS:
                        limit and are resumed when queue falls below threshold
   -t, --timeout 5.0  - After timeout seconds, run rsync sync/copy process even
                        if batch wasn't full
+  -d, --delete       - Delete files from DST which don't exist in SRC (same
+                       as rsync option --delete)
 
   -r, --rsync rsync  - Name (and/or path) of rsync binary
 
@@ -74,6 +76,7 @@ $C= {
   queuesize: nil,
   timeout: 5.0,
   rsync: 'rsync',
+  delete: false,
   verbose: false,
   sources: [],
   find_options: %w/-ae=ssh/,
@@ -100,6 +103,7 @@ opts= GetoptLong.new(
   [ '--batchsize', '-b', GetoptLong::REQUIRED_ARGUMENT ],
   [ '--queuesize', '-q', GetoptLong::REQUIRED_ARGUMENT ],
   [ '--timeout', '-t', GetoptLong::REQUIRED_ARGUMENT ],
+  [ '--delete', '-d', GetoptLong::NO_ARGUMENT ],
   [ '--rsync', '-r', GetoptLong::REQUIRED_ARGUMENT ],
   [ '--verbose', '-v', GetoptLong::NO_ARGUMENT ],
   [ '--help', '-h', GetoptLong::NO_ARGUMENT ],
@@ -115,6 +119,8 @@ opts.each do |opt, arg|
     $C[opt[2..].to_sym]= arg.to_f
   when '--rsync'
     $C[:rsync]= arg
+  when '--delete'
+    $C[:delete]= true
   when '--verbose'
     $C[:verbose]= true
   when '--help'
@@ -168,6 +174,16 @@ if $C[:verbose]
   $C[:sync_options].unshift '-v'
 end
 
+if $C[:delete]
+  $C[:find_options_always].push '--delete'
+  # Files in SRC must be able to replace non-empty directories in DST
+  $C[:sync_options].push '--force'
+  # Options for rsync processes which delete files. Filter rules for the
+  # paths to delete are read from STDIN, and all other paths are excluded.
+  $C[:delete_options]= $C[:sync_options].reject {|a| a.start_with? '--files-from' }+
+    ['-r', '--delete', '--from0', '--filter=. -', '--exclude=*']
+end
+
 def v msg; $C[:verbose] and puts msg end
 
 #######################################################################
@@ -178,7 +194,8 @@ RSYNC_HOST= %r{(?:[^/:@]+@)?(?:\[[^\]]+\]|[^/:]+)}
 # Splits rsync source into the directory that the paths printed by finder
 # are relative to, and the name of the item to sync in that directory.
 # Name is nil if source's contents are synced instead (as with "dir/").
-# Also returns the prefix which needs to be added to paths given to syncer.
+# Also returns the prefix which needs to be added to paths given to syncer,
+# and the directory to use as SRC when deleting files.
 def split_source source
   daemon= false
   prefix, path= case source
@@ -208,9 +225,9 @@ def split_source source
     # Rsync daemon doesn't find the files from --files-from if source is a
     # directory inside of a module. So module is used as source, and the
     # directory is added to paths (where "/./" marks the part to ignore)
-    [prefix+ '/', name&.b, (root[1..]+ './').b]
+    [prefix+ '/', name&.b, (root[1..]+ './').b, prefix+ root]
   else
-    [prefix+ root, name&.b, '']
+    [prefix+ root, name&.b, '', prefix+ root]
   end
 end
 
@@ -227,19 +244,43 @@ def dir_dest dest
 end
 
 # Parses a line printed by finder (in format "%i %n") and returns item
-# type and path to sync. Returns nil for all other lines (messages etc.)
+# type and path to sync. Type is "*" if the path is to be deleted from DST.
+# Returns nil for all other lines (messages etc.)
 def parse_line l
   l= l.b.chomp "\n"
-  return unless l=~ /\A[<>ch.]([fdLDS]).{9} (.+)\z/mn
-  type= $1
+  return unless l=~ /\A(?:[<>ch.]([fdLDS]).{9}|(\*)deleting  ) (.+)\z/mn
+  type= $1|| $2
   # Undo rsync's escaping of unprintable characters (e.g. newline is \#012)
-  path= $2.gsub(/\\#(\d{3})/n) { $1.oct.chr }
+  path= $3.gsub(/\\#(\d{3})/n) { $1.oct.chr }
+
+  # Paths to delete are returned as they are (directories end with "/")
+  return [type, path] if type== '*'
 
   # Source directory itself can't be synced without also listing its contents
   return if path== './'
 
   # Same goes for other directories if they are specified with a trailing "/"
   [type, path.chomp('/')]
+end
+
+# Returns rsync filter rules for deleting the path from DST, separated with
+# "\0". Parent directories of the path need to be sent by the sending side
+# (rule "S") so that rsync looks into them in DST, and the path itself
+# needs to be included (rule "+"; with its contents if it is a directory).
+# As everything else is excluded, nothing else can get deleted.
+def delete_rules path
+  # Wildcards need to be escaped. But backslash is a regular character
+  # in patterns which don't contain any wildcards.
+  pattern= lambda {|path, suffix|
+    path= path.gsub(/[\\*?\[]/n) { '\\'+ $& } if (path+ suffix)=~ /[*?\[]/n
+    '/'+ path+ suffix
+  }
+
+  dirs= path.chomp('/').split '/'
+  dirs.pop
+  rules= dirs.each_index.map {|i| 'S '+ pattern.(dirs[0..i].join('/'), '/') }
+  rules<< '+ '+ (path.end_with?('/') ? pattern.(path, '***') : pattern.(path, ''))
+  rules.join "\0"
 end
 
 # Remembers exit status of the first rsync process that failed. That
@@ -279,12 +320,18 @@ class Finder
     # Sources are taken from the queue which is shared by all finders
     while source= sources.pop
       queue= Queue.new
+      queues= [queue]
       threads= []
-      root, name, prefix= split_source source
+      root, name, prefix, dir= split_source source
       cmdline= [cmd, args, $C[:find_options_always], source, dest].flatten
       v "Starting finder: %s" % [cmdline]
       $C[:syncers].times do |i|
         threads<< Thread.new { Syncer.new queue, $C[:rsync], $C[:sync_options], root, dir_dest(dest) }
+      end
+      if $C[:delete]
+        # Paths to delete have a separate queue, and a syncer which deletes them
+        queues<< deletes= Queue.new
+        threads<< Thread.new { Syncer.new deletes, $C[:rsync], $C[:delete_options], dir, dir_dest(dest) }
       end
 
       Open3.popen2(*cmdline) {|i,o,t|
@@ -292,7 +339,9 @@ class Finder
           type, path= parse_line l
 
           if path
-            if type!= 'd' and path== name and $C[:sources].size== 1
+            if type== '*'
+              deletes<< delete_rules(path) if deletes
+            elsif type!= 'd' and path== name and $C[:sources].size== 1
               # A single file is synced by running rsync on it directly,
               # because in that case DST can also be the new name of the file
               direct= [cmd, $C[:sync_options].reject {|a| a.start_with? '--files-from' }, source, dest].flatten
@@ -304,10 +353,10 @@ class Finder
             end
           end
 
-          if queue.size> $C[:queuesize]
+          if queues.any? {|q| q.size> $C[:queuesize] }
             signal_finder t, 'STOP'
-            v 'Queue contains %d files, pausing finder while queue is being processed' % queue.size
-            while queue.size> $C[:queuesize]
+            v 'Queue contains %d files, pausing finder while queue is being processed' % queues.sum(&:size)
+            while queues.any? {|q| q.size> $C[:queuesize] }
               sleep $C[:timeout]
             end
             signal_finder t, 'CONT'
@@ -317,7 +366,7 @@ class Finder
       }
 
       # Closing the queue tells syncers that there will be no more paths
-      queue.close
+      queues.each &:close
       threads.each &:join
     end
   end
@@ -387,6 +436,16 @@ end
 # Run the thing:
 
 v "Config: #{$C}"
+
+# Finders work independently, and each one would delete from DST the files
+# which don't exist in its SRC. So they must not be syncing into the same
+# directory, which is the case if contents of a directory are synced ("SRC/").
+if $C[:delete] and $C[:sources].size> 1
+  names= $C[:sources].map {|source| split_source(source)[1] }
+  if names.include? nil or names.uniq!
+    abort 'Option --delete can be used with multiple SRC paths only if they are synced into different directories in DST (which is not the case if SRC ends with "/")'
+  end
+end
 
 sources= Queue.new
 $C[:sources].each {|source| sources<< source }
