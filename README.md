@@ -207,12 +207,6 @@ Run `test/run.sh -h` for more information.
 
 The tests also run in GitHub Actions on every push and pull request.
 
-## Releasing
-
-Set the new version in `rsyncnow.gemspec`, push, and publish a GitHub release whose
-tag is that version prefixed with `v` (e.g. `v1.0.0`). GitHub Actions then run the
-tests, build the gem and attach it to the release.
-
 ## Misc notes
 
 By default, 1 rsync finder process is started for each source directory,
