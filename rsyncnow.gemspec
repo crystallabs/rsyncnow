@@ -3,7 +3,7 @@
 Gem::Specification.new do |s|
   s.name        = 'rsyncnow'
   # Must match the tag of a GitHub release (tag v1.0.0 for version 1.0.0)
-  s.version     = '1.0.0'
+  s.version     = '1.0.1'
   s.summary     = 'Fast rsync indexing/syncing for enormous data sets'
   s.description = 'Runs rsync processes which find the files to sync, and ' \
                   'syncs those files with other rsync processes as soon as ' \
