@@ -9,11 +9,9 @@ Rsync's delta algorithm doesn't need any changes - once a file to sync
 is identified, the algorithm does its job well (or the whole file is
 copied with rsync option `-W`).
 
-But when rsync is told to sync two directories, before it begins with
+But when rsync is told to sync directories, before it begins with
 the actual syncing it builds an index of the files that need to be
-synced.
-
-On large data sets, this index building can take hours, days, or weeks.
+synced. On large data sets, this index building can take hours, days, or weeks.
 
 In addition to just taking time, it is making it harder to schedule data
 migrations at the end/beginning of months when the extra traffic will not
@@ -232,3 +230,7 @@ See a myriad of options available in the [rsync man page](https://download.samba
 ## Feedback
 
 Please report any comments or suggestions!
+
+## License
+
+GNU Affero General Public License v3. See [LICENSE](LICENSE).

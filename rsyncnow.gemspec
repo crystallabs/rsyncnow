@@ -12,6 +12,7 @@ Gem::Specification.new do |s|
   s.authors     = ['Davor Ocelic']
   s.email       = ['docelic@crystallabs.io']
   s.homepage    = 'https://github.com/docelic/rsyncnow'
+  s.license     = 'AGPL-3.0-only'
   s.metadata    = {
     'source_code_uri' => s.homepage,
     'bug_tracker_uri' => "#{s.homepage}/issues"
@@ -19,7 +20,7 @@ Gem::Specification.new do |s|
 
   # The whole program is the script in the top directory (executables are
   # added to files automatically)
-  s.files       = ['README.md']
+  s.files       = ['README.md', 'LICENSE']
   s.bindir      = '.'
   s.executables = ['rsyncnow']
 
