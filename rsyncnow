@@ -7,7 +7,6 @@ require 'timeout'
 # TODO:
 # - Ability to use --finders X with X less than number of source paths
 # - If finders finish, run sync immediately instead of waiting -t SECs
-# - Solve error with /tmp/a /tmp/b
 
 #######################################################################
 # Usage/help and examples:
@@ -39,8 +38,9 @@ SRC, DST:
 
 FIND OPTIONS:
   If specified, overrides all default cmdline options for rsync find processes.
-  If you use this, options `-niR` must always be present/included.
-  Default value: -aniRe=ssh
+  Default value: -ae=ssh
+    NOTE: options `--dry-run --no-relative --out-format='%i %n'` are always
+    added automatically. This also means that option -R can not be used.
 
 SYNC OPTIONS:
   If specified, overrides all default cmdline options for rsync sync processes.
@@ -59,12 +59,12 @@ Usage: #{$0} [OPTIONS...] SRC... DST -- [FIND OPTIONS...] -- [SYNC OPTIONS...]
 EXAMPLES:
 
 # Most basic example:
-# (implies finding files to sync with rsync options -aniRe=ssh,
+# (implies finding files to sync with rsync options -ae=ssh,
 # and syncing the actual files with rsync options -lptgoD0e=ssh --files-from=-)
 rsyncnow -v /source/dir /target/dir
 
 # Finding files to sync based on file size only, without full checksum:
-rsyncnow -v /source/dir /target/dir -- -aniRe=ssh --size-only
+rsyncnow -v /source/dir /target/dir -- -ae=ssh --size-only
 END
 end
 
@@ -80,15 +80,23 @@ $C= {
   rsync: 'rsync',
   verbose: false,
   sources: [],
-  find_options: %w/-aniRe=ssh/,
+  find_options: %w/-ae=ssh/,
+  # Options that are always added to rsync find processes
+  find_options_always: ['--dry-run', '--no-relative', '--out-format=%i %n'],
   sync_options: %w/-lptgoD0e=ssh --files-from=-/,
   # Runtime variables (mostly accessed while holding a mutex):
   runtime: {
     finders: 0,
+    status: 0,
+    synced: false,
   }
 }
 
 $mutex= Mutex.new
+$first= Mutex.new
+
+# Arguments are treated as binary data because paths can contain anything
+ARGV.map! &:b
 
 # Parse program options (note: does not include rsync-specific options)
 opts= GetoptLong.new(
@@ -172,14 +180,112 @@ end
 def v msg; $C[:verbose] and puts msg end
 
 #######################################################################
+# Define helper functions:
+
+RSYNC_HOST= %r{(?:[^/:@]+@)?(?:\[[^\]]+\]|[^/:]+)}
+
+# Splits rsync source into the directory that the paths printed by finder
+# are relative to, and the name of the item to sync in that directory.
+# Name is nil if source's contents are synced instead (as with "dir/").
+# Also returns the prefix which needs to be added to paths given to syncer.
+def split_source source
+  daemon= false
+  prefix, path= case source
+    when %r{\A(rsync://[^/]+/[^/]*)(.*)\z}m, %r{\A(#{RSYNC_HOST}::[^/]*)(.*)\z}m
+      # Rsync daemon; module without a path is the same as "module/"
+      daemon= true
+      [$1, $2.empty? ? '/' : $2]
+    when %r{\A(#{RSYNC_HOST}:)(.*)\z}m
+      # Remote shell; paths are relative to home directory. Leading "~/" is
+      # removed because rsync doesn't expand it when --files-from is used
+      [$1, $2.sub(%r{\A~(/|\z)}, '')]
+    else
+      ['', source]
+  end
+  path= '.' if path.empty?
+
+  dir, _, name= path.rpartition '/'
+  if name.empty?
+    root, name= path, nil
+  elsif name== '.' or name== '..'
+    root, name= path+ '/', nil
+  else
+    root= dir.empty? ? './' : dir+ '/'
+  end
+
+  if daemon and root!= '/'
+    # Rsync daemon doesn't find the files from --files-from if source is a
+    # directory inside of a module. So module is used as source, and the
+    # directory is added to paths (where "/./" marks the part to ignore)
+    [prefix+ '/', name&.b, (root[1..]+ './').b]
+  else
+    [prefix+ root, name&.b, '']
+  end
+end
+
+# Returns DST for syncer. It always needs to be treated as a directory,
+# even when it doesn't exist yet and a batch contains only one file.
+def dir_dest dest
+  if dest.end_with? '/'
+    dest
+  elsif dest=~ %r{\A#{RSYNC_HOST}:\z}
+    dest+ './'
+  else
+    dest+ '/'
+  end
+end
+
+# Parses a line printed by finder (in format "%i %n") and returns item
+# type and path to sync. Returns nil for all other lines (messages etc.)
+def parse_line l
+  l= l.b.chomp "\n"
+  return unless l=~ /\A[<>ch.]([fdLDS]).{9} (.+)\z/mn
+  type= $1
+  # Undo rsync's escaping of unprintable characters (e.g. newline is \#012)
+  path= $2.gsub(/\\#(\d{3})/n) { $1.oct.chr }
+
+  # Source directory itself can't be synced without also listing its contents
+  return if path== './'
+
+  # Same goes for other directories if they are specified with a trailing "/"
+  [type, path.chomp('/')]
+end
+
+# Remembers exit status of the first rsync process that failed. That
+# value is then used as exit status of rsyncnow.
+def check status
+  return if status.success?
+  $mutex.synchronize {
+    $C[:runtime][:status]= status.exitstatus|| 1 if $C[:runtime][:status]== 0
+  }
+end
+
+# Sends a signal to finder process. Does nothing if finder has already
+# exited, which is normal (its output may still be waiting to be read).
+def signal_finder thread, signal
+  Process.kill signal, thread.pid if thread.alive?
+rescue Errno::ESRCH
+end
+
+# Runs the block. The first run is done alone, because rsync may then need
+# to create DST, and multiple rsync processes can't do that at the same time.
+def first_alone
+  if $C[:runtime][:synced]
+    yield
+  else
+    $first.synchronize {
+      yield
+      $C[:runtime][:synced]= true
+    }
+  end
+end
+
+#######################################################################
 # Define worker classes:
 
 class Finder
   def initialize cmd, args, sources, dest
-    cmdline= [cmd, args, sources, dest].flatten
     queue= Queue.new
-    v "Starting finder: %s" % [cmdline]
-
     threads= []
 
     $mutex.synchronize {
@@ -187,44 +293,40 @@ class Finder
     }
 
     sources.each do |source|
-      dest2= dest
-      if source[-1]!= '/' and File.directory? source
-        source += '/'
-      end
-      if source[-1]!= '/'
-        source_size= source.size
-        dest2= File.join dest2, File.basename(source)
-      else
-        source_size= source.size- 1
-      end
-      cmdline= [cmd, args, source, dest2].flatten
+      root, name, prefix= split_source source
+      cmdline= [cmd, args, $C[:find_options_always], source, dest].flatten
+      v "Starting finder: %s" % [cmdline]
       $C[:syncers].times do |i|
-        threads<< Thread.new { Syncer.new queue, $C[:rsync], $C[:sync_options], source, dest2 }
+        threads<< Thread.new { Syncer.new queue, $C[:rsync], $C[:sync_options], root, dir_dest(dest) }
       end
 
       Open3.popen2(*cmdline) {|i,o,t|
         o.each_line do |l|
-          l= l[(13+source_size)..-2]
+          type, path= parse_line l
 
-          if l and l[/\S/]
-            queue<< l
+          if path
+            if type!= 'd' and path== name and $C[:sources].size== 1
+              # A single file is synced by running rsync on it directly,
+              # because in that case DST can also be the new name of the file
+              direct= [cmd, $C[:sync_options].reject {|a| a.start_with? '--files-from' }, source, dest].flatten
+              v "Running syncer for a single file: %s" % [direct]
+              system *direct
+              check $?
+            else
+              queue<< prefix+ path
+            end
           end
 
           if queue.size> $C[:queuesize]
-            Process.kill 'STOP', t.pid
+            signal_finder t, 'STOP'
             v 'Queue contains %d files, pausing finder while queue is being processed' % queue.size
             while queue.size> $C[:queuesize]
               sleep $C[:timeout]
             end
-          end
-
-          begin
-            Process.kill 'CONT', t.pid
-          rescue Errno::ESRCH
-            STDERR.puts 'Cannot find finder child process %d; already exited?; ignoring' % [t.pid]
+            signal_finder t, 'CONT'
           end
         end
-        t.join
+        check t.value
       }
     end
 
@@ -258,16 +360,19 @@ class Syncer
 
       if list.size> 0
         v 'Finder batch size reached for %s; running syncer with a batch of %d paths' % [source, $C[:batchsize]]
-        read_io, write_io= IO.pipe
-        child= fork do
+        first_alone do
+          read_io, write_io= IO.pipe
+          child= fork do
+            write_io.close
+            STDIN.reopen read_io
+            exec *cmdline
+          end
+          read_io.close
+          write_io.write list.join "\0"
           write_io.close
-          STDIN.reopen read_io
-          exec *cmdline
+          Process.wait child
+          check $?
         end
-        read_io.close
-        write_io.write list.join "\0"
-        write_io.close
-        Process.wait child
       else
         break if $C[:runtime][:finders]== 0
       end
@@ -289,3 +394,5 @@ $C[:finders].times do |i|
   threads<< Thread.new { Finder.new $C[:rsync], $C[:find_options], $C[:sources][range], $C[:destination] }
 end
 threads.each &:join
+
+exit $C[:runtime][:status]
