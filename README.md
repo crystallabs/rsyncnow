@@ -59,6 +59,14 @@ faster/concurrent syncing of multiple files.
 
 You need Ruby installed to run the script. Hopefully this is a trivial requirement.
 
+The script is a single file and can be run directly from a clone of this repository.
+It can also be installed as a gem, which is attached to every
+[release](https://github.com/docelic/rsyncnow/releases):
+
+```
+gem install ./rsyncnow-X.Y.Z.gem
+```
+
 
 ```
 Usage: rsyncnow [OPTIONS...] SRC... DST -- [FIND OPTIONS...] -- [SYNC OPTIONS...]
@@ -199,6 +207,14 @@ test/run.sh
 
 Tests which need `ssh localhost` to work without a password are skipped if it doesn't.
 Run `test/run.sh -h` for more information.
+
+The tests also run in GitHub Actions on every push and pull request.
+
+## Releasing
+
+Set the new version in `rsyncnow.gemspec`, push, and publish a GitHub release whose
+tag is that version prefixed with `v` (e.g. `v1.0.0`). GitHub Actions then run the
+tests, build the gem and attach it to the release.
 
 ## Misc notes
 
