@@ -29,7 +29,7 @@ and then starts syncing, cannot be changed.
 
 However, rsync has some useful command line options. One of them is a mode
 in which rsync will print the files that need syncing to STDOUT in real
-time. That is, will print the filenames to sync immediately as it
+time. That is, it will print the filenames to sync immediately as it
 finds/identifies them, during index building.
 
 This enables `rsyncnow` to introduce a huge increase in efficiency on large
@@ -44,14 +44,13 @@ them and (again in real time)  pushing them to a small internal queue.
 
 1. As soon as `rsyncnow` collects the requested amount of filenames to
 sync in a batch (or every X seconds if a batch has not been filled up yet),
-it runs separate rsync processes (called `syncers`) which are given
-specific files to sync, and so they too execute immediately since there
-there are no indexes to build.
+it runs separate rsync processes (called `syncers`) which then sync specific
+lists of files, and so execute immediately since there there are no
+indexes to build.
 
 1. Additionally, if the filenames to sync are being found faster than they
-are synced, and the bandwidth/resource limits allow it, one can run
-`rsyncnow` with more `syncer` processes to achieve even
-faster/concurrent syncing of multiple files.
+are synced, and the bandwidth allows it, one can run `rsyncnow` with more
+`syncer` processes to achieve even faster/concurrent syncing of multiple files.
 
 ## Usage instructions
 
