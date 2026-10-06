@@ -26,7 +26,7 @@
 #   RSYNCNOW_TEST_PORT  - Port for rsync daemon (default: 8873)
 #   RSYNCNOW_TEST_JOBS  - Number of tests to run in parallel (default: 8)
 #
-# Requirements: bash, GNU findutils and coreutils, rsync, ruby
+# Requirements: bash, GNU findutils and coreutils, procps, rsync, ruby
 
 set -u
 
@@ -81,6 +81,9 @@ L26|local|.|a/ a2 b||
 L27|local|.|'sp ace/' b||
 L28|local|.|'sp ace' b||
 L29|local|.|empty/ b||
+L34|local|.|empty/ nb||
+L35|local|.|empty/ a2 nb||
+L36|local|.|a2/ a/ b||
 L30|local|.|empty b||
 L31|local|.|single/ nb||
 L32|local|.|single nb||
@@ -133,6 +136,10 @@ O05|local|.|a/sub a/file1 nb|-b 1 -s 2|
 O06|local|.|a/ a2/ single/ lnk/ odd/ nb|-s 4 -b 1|
 O07|local|.|a a2 single lnk nb/|-s 2|
 O08|local|.|a/ a2/ single/ lnk/ odd/ b|-f 1|
+O13|local|.|a/ b|-- -- -lptgoD -W|
+O14|local|.|a b|-- -a -- -lptgoD|
+O15|local|.|a/ stale|-- -a --size-only|
+O16|local|.|a/ a2 b|-v|
 O09|local|.|a/ a2/ single/ lnk/ odd/ nb|-f 2 -s 2|
 O10|local|.|a a2 single nb|-f 1 -b 1|
 O11|local|.|a/ a2 b|-f 5|
@@ -151,6 +158,34 @@ X11|local|.|a/sub/ del|--delete|--delete
 X12|local|.|empty/ del|--delete|--delete
 X13|local|.|a/ synced|--delete|--delete
 X14|local|.|a/sub a/file1 named/a|--delete -f 1|--delete
+Y01|local|.|a/sub/ b|-R|-R
+Y02|local|.|a/sub b|-R|-R
+Y03|local|.|a b|-R|-R
+Y04|local|.|./a/sub/ b|-R|-R
+Y05|local|.|{R}/a/sub/ b|-R|-R
+Y06|local|.|a/./sub/ b|-R|-R
+Y07|local|.|{R}/a/./sub b|-R|-R
+Y08|local|.|a/./ b|-R|-R
+Y09|local|.|a/sub/file2 b|-R|-R
+Y10|local|.|a/sub/file2 nb|-R|-R
+Y11|local|.|{R}/a/./sub/file2 b/newname|-R|-R
+Y12|local|.|a/file1 a2/other b|-R|-R
+Y13|local|.|a/ a2 nb|-R|-R
+Y14|local|.|a/sub/../ b|-R|-R
+Y15|local|a|. ../b|-R|-R
+Y16|local|a/sub|./ ../../b|-R|-R
+Y17|local|.|'sp ace/in ner' b|-R|-R
+Y18|local|.|a/* b|-R|-R
+Y19|local|.|lnk/ odd nb|-R -f 1 -b 1|-R
+Y20|local|.|a/sub/ a/sub/file2 a b|-R|-R
+Y21|local|.|a/ named|-R --delete|-R --delete
+Y22|local|.|a/sub/ named|-R --delete|-R --delete
+Y23|local|.|a/./sub/ del|-R --delete|-R --delete
+Y24|local|.|a a2 named|-R --delete|-R --delete
+Y25|local|.|a/./sub/ a2/ del|-R --delete|-R --delete
+Y26|local|.|a/./ del|-R --delete -b 2|-R --delete
+Y27|local|.|odd/./ delodd|-R --delete|-R --delete
+Y28|local|.|{R}/rep/./ repdst|-R --delete|-R --delete
 R01|ssh|.|localhost:{R}/a/ b||
 R02|ssh|.|localhost:{R}/a b||
 R03|ssh|.|localhost:{R}/a/file1 b||
@@ -195,6 +230,14 @@ X23|ssh|.|odd/ localhost:{R}/delodd|--delete|--delete
 X24|ssh|.|localhost:{R}/odd/ delodd|--delete -b 2|--delete
 X25|ssh|.|'localhost:~/{H}/' del|--delete|--delete
 X26|ssh|.|rep/ localhost:{R}/repdst|--delete|--delete
+Y40|ssh|.|localhost:{R}/a/sub/ b|-R|-R
+Y41|ssh|.|localhost:{R}/a/./sub b|-R|-R
+Y42|ssh|.|a/sub/ localhost:{R}/b|-R|-R
+Y43|ssh|.|localhost:{H}/sub b|-R|-R
+Y44|ssh|.|'localhost:~/{H}/sub' b|-R|-R
+Y45|ssh|.|localhost:{R}/./a/ named|-R --delete|-R --delete
+Y46|ssh|.|a/./ localhost:{R}/del|-R --delete|-R --delete
+Y47|ssh|.|localhost:{R}/a/./sub/file2 localhost:{R}/a2/./other nb|-R|-R
 G01|daemon|.|rsync://localhost:$PORT/mod/{P}/a/ b|$DX|
 G02|daemon|.|rsync://localhost:$PORT/mod/{P}/a b|$DX|
 G03|daemon|.|localhost::mod/{P}/a/ b|-- -a --port=$PORT -- -lptgoD0 --port=$PORT --files-from=-|--port=$PORT
@@ -216,6 +259,12 @@ X31|daemon|.|a/ rsync://localhost:$PORT/mod/{P}/del|--delete $DX|--delete
 X32|daemon|.|rsync://localhost:$PORT/mod/{P}/a named|--delete $DX|--delete
 X33|daemon|.|rsync://localhost:$PORT/mod/{P}/odd/ delodd|--delete $DX|--delete
 X34|daemon|.|rsync://localhost:$PORT/one del|--delete $DX|--delete
+Y60|daemon|.|rsync://localhost:$PORT/mod/{P}/./a/sub/ b|-R $DX|-R
+Y61|daemon|.|rsync://localhost:$PORT/one/sub b|-R $DX|-R
+Y62|daemon|.|rsync://localhost:$PORT/one b|-R $DX|-R
+Y63|daemon|.|a/sub/ rsync://localhost:$PORT/mod/{P}/b|-R $DX|-R
+Y64|daemon|.|rsync://localhost:$PORT/mod/{P}/./a/ named|-R --delete $DX|-R --delete
+Y65|daemon|.|localhost::mod/{P}/./a2 b|-R -- -a --port=$PORT -- -lptgoD0 --port=$PORT --files-from=-|-R --port=$PORT
 EOF
 }
 
@@ -231,7 +280,7 @@ setup() {
   echo f > $r/lnk/f; echo g > $r/lnk/d/g
   ln -s f $r/lnk/l; ln -s d $r/lnk/dl; ln -s nowhere $r/lnk/dang
   ln -s a $r/adir
-  for f in "x -> y" " lead" "trail " $'new\nline' "ünï" $'latin\351' 'back\slash' 'lit\#012x' "-dash" 'star*' 'q?' $'tab\tbed'; do
+  for f in "x -> y" " lead" "trail " $'new\nline' "ünï" $'latin\351' 'back\slash' 'lit\#012x' "-dash" 'star*' 'q?' $'tab\tbed' '#hash' ';semi' ' ' '~tilde' '\$dollar' '"quote' "it's"; do
     echo o > "$r/odd/$f"
   done
   echo old-and-much-longer > $r/stale/file1; echo e > $r/stale/extra
@@ -243,23 +292,42 @@ setup() {
   cp -a $r/a/. $r/del/; cp -a $r/a/. $r/named/a/
   echo x > $r/del/gone; echo x > $r/del/sub/gone2; echo x > $r/del/gonedir/deep/f
   ln -s nowhere $r/del/gonelink; ln -s sub $r/del/gonedirlink
-  echo x > $r/named/a/gone; echo x > $r/named/a/gonedir/f; echo x > $r/named/stay
+  echo x > $r/named/a/gone; echo x > $r/named/a/gonedir/f; echo x > $r/named/a/sub/gone3; echo x > $r/named/stay
   cp -a "$r/odd/q?" "$r/odd/x -> y" "$r/odd/back\slash" $r/delodd/
-  for f in 'g*ne' 'g?ne' '[g]one' 'back\gone' 'b\s*' 'lit\#012gone' $'new\ngone' ' gone' 'gone ' 'gonè' $'gon\351' 'gone -> x' '-gone' 'gonedir/g*'; do
+  for f in 'g*ne' 'g?ne' '[g]one' 'back\gone' 'b\s*' 'lit\#012gone' $'new\ngone' ' gone' 'gone ' 'gonè' $'gon\351' 'gone -> x' '-gone' 'gonedir/g*' '#gone' ';gone' '+ gone' '- gone' '~gone'; do
     echo x > "$r/delodd/$f"
   done
 
   # A file which replaces a directory, and a directory which replaces a file
   mkdir -p $r/rep/f2d $r/repdst/d2f/inner
   echo f > $r/rep/d2f; echo x > $r/rep/f2d/x; echo y > $r/repdst/d2f/inner/y; echo z > $r/repdst/f2d; echo g > $r/repdst/gone
+
+  # Various permissions and modification times, to see if they get synced
+  chmod 750 $r/a $r/odd; chmod 711 $r/a/sub; chmod 700 $r/a2 $r/lnk/d; chmod 640 $r/a/file1; chmod 600 $r/a2/other
+  chmod 770 $r/single $r/rep; chmod 705 $r/empty "$r/sp ace"; chmod 751 $r/lnk
+  find $r -mindepth 1 -exec touch -h -d '2020-01-02 03:04:05' {} +
+  touch -d '2011-01-01' $r/a $r/synced $r/del $r/named/a; touch -d '2012-02-02' $r/a2; touch -d '2013-03-03' $r/a/sub $r/synced/sub $r/del/sub $r/named/a/sub
+  touch -d '2014-04-04' $r/a/file1 $r/synced/file1 $r/del/file1 $r/named/a/file1; touch -d '2015-05-05' $r/odd $r/lnk $r/single $r/empty $r/rep
+  touch -h -d '2016-06-06' $r/lnk/l $r/adir
 }
 
-# Prints the list of everything in directory $1 (with file sizes and checksums)
+# Prints the list of everything in directory $1, with permissions,
+# modification times (only if older than a day, which is the case for
+# everything created by function setup), file sizes and checksums
 tree() {
-  (cd "$1" && find . -mindepth 1 \
-    \( -type f -printf 'f %p %s ' -exec sh -c 'md5sum < "$1" | cut -c1-8' _ {} \; \) -o \
-    \( -type l -printf 'l %p -> %l\n' \) -o \
-    -printf '%y %p\n' | LC_ALL=C sort)
+  ruby -rfind -rdigest -e '
+    Dir.chdir ARGV[0]
+    Find.find(".").map(&:b).sort.each do |path|
+      next if path== "."
+      s= File.lstat path
+      time= Time.now- s.mtime> 86400 ? s.mtime.to_i : "new"
+      puts case s.ftype
+        when "link" then "l %s %s -> %s" % [path.inspect, time, File.readlink(path).inspect]
+        when "file" then "f %s %o %s %d %s" % [path.inspect, s.mode& 07777, time, s.size, Digest::MD5.file(path).hexdigest[0, 8]]
+        else "%s %s %o %s" % [s.ftype[0], path.inspect, s.mode& 07777, time]
+      end
+    end
+  ' "$1"
 }
 
 # Runs test $1: once with rsyncnow (in $W/m/$1/now), once with rsync (in $W/m/$1/ref)
@@ -278,7 +346,8 @@ run_test() {
       eval "timeout 60 rsync -a $rx \"\$@\"" > $W/m/$n/$mode.log 2>&1
     fi
     echo $? > $W/m/$n/$mode.rc
-    tree $root > $W/m/$n/$mode.tree
+    # With option -R and absolute SRC, $root is also a part of paths in DST
+    tree $root | sed "s#${root#/}#{R}#g" > $W/m/$n/$mode.tree
   done
 }
 
@@ -309,10 +378,9 @@ report_extra() {
   if [ $3 = 0 ]; then echo "ok    $1  $2"; else echo "FAIL  $1  $2"; return 1; fi
 }
 
-# Prints what is left to sync from $1 to $2 (ignoring the attributes of the
-# top-level directory, which rsyncnow doesn't sync)
+# Prints what is left to sync from $1 to $2
 left() {
-  rsync -ani --delete "$1" "$2" | grep -v '^\.d\.\.t\.\.\.\.\.\. \./$'
+  rsync -ani --delete "$1" "$2"
 }
 
 #######################################################################
@@ -362,7 +430,9 @@ E04() {
 # Verbose mode works, and shows what is being done
 E05() {
   mkdir -p v; echo 1 > v/file
-  ruby $RSYNCNOW -v -t 0.2 v/ dst5 > E05.log 2>&1 && grep -q 'Starting finder' E05.log && grep -q '^file$' E05.log
+  ruby $RSYNCNOW -v -t 0.2 v/ dst5 > E05.log 2>&1 && grep -q 'Starting finder' E05.log && grep -q '^file$' E05.log || return 1
+  echo x > dst5/gone
+  ruby $RSYNCNOW -v -R --delete -t 0.2 v/./ dst5 > E05.log 2>&1 && grep -q '^deleting gone$' E05.log && ! grep -q "rsyncnow:" E05.log
 }
 
 # Exit status is the one of rsync if finder fails...
@@ -439,11 +509,82 @@ E14() {
   [ $? = 1 ] && grep -q 'Option --delete' E14.log && [ "$(ls mdst)" = stay ]
 }
 
+# Deleting doesn't change the attributes of DST
+E15() {
+  mkdir -p p/a/sub pdst/a/sub; echo 1 > p/a/sub/f; cp -a p/a/sub/f pdst/a/sub/; echo x > pdst/a/sub/gone
+  chmod 755 p; chmod 700 pdst; touch -d '2001-01-01' pdst
+  ruby $RSYNCNOW -t 0.2 --delete p/a pdst > E15.log 2>&1 && [ ! -e pdst/a/sub/gone ] &&
+    [ "$(stat -c '%a %Y' pdst)" = "700 $(date -d 2001-01-01 +%s)" ]
+}
+
+# With option -R, --delete is refused if sources which are relative to
+# different directories are synced into the same directory
+E16() {
+  mkdir -p m1 m2 mdst; echo 1 > m1/a; echo 2 > m2/b; echo x > mdst/stay
+  ruby $RSYNCNOW -t 0.2 -R --delete m1/./ m2/./ mdst > E16.log 2>&1
+  [ $? = 1 ] && grep -q 'Option --delete' E16.log && [ "$(ls mdst)" = stay ]
+}
+
+# Same as E01, with option -R
+E17() {
+  big_tree
+  ruby $RSYNCNOW -R -t 0.2 -s 3 -b 7 -q 20 src/ dst17 > E17.log 2>&1 && [ ! -s E17.log ] && [ -z "$(rsync -aniR --delete src/ dst17)" ]
+}
+
+# Same as E13, with option -R and directory itself as SRC
+E18() {
+  local d
+  big_tree; rsync -aR src dst18
+  for d in $(seq 1 30); do
+    echo x > dst18/src/d$d/gone; mkdir -p dst18/src/d$d/n1/gonedir/deep; echo x > dst18/src/d$d/n1/gonedir/deep/f
+  done
+  chmod 700 dst18; touch -d '2001-01-01' dst18
+  ruby $RSYNCNOW -R -t 0.2 --delete -b 7 -q 20 src dst18 > E18.log 2>&1 && [ ! -s E18.log ] &&
+    [ -z "$(rsync -aniR --delete src dst18)" ] && [ "$(stat -c '%a %Y' dst18)" = "700 $(date -d 2001-01-01 +%s)" ]
+}
+
+# Invalid arguments are reported, with exit status 1
+E19() {
+  local out o
+  mkdir -p v; echo 1 > v/file
+  out=$(ruby $RSYNCNOW 2>&1); [ $? = 1 ] && [[ $out == Usage:* ]] || return 1
+  out=$(ruby $RSYNCNOW dst19 2>&1); [ $? = 1 ] && [[ $out == Usage:* ]] || return 1
+  out=$(ruby $RSYNCNOW --nosuchoption v/ dst19 2>&1); [ $? = 1 ] && [[ $out != *getoptlong* ]] || return 1
+  for o in '-f 0' '-s 0' '-b 0' '-q 0' '-t 0' '-s x'; do
+    out=$(timeout 10 ruby $RSYNCNOW $o v/ dst19 2>&1); [ $? = 1 ] && [[ $out == *'must be greater than 0' ]] || return 1
+  done
+  out=$(ruby $RSYNCNOW -r ./nosuchrsync v/ dst19 2>&1); [ $? = 1 ] && [[ $out == "Can't run rsync"* ]] && [ ! -e dst19 ]
+}
+
+# If rsyncnow is terminated, rsync processes don't keep running (the
+# finder is paused at that moment, because its queue is full)
+E20() {
+  local pid rc
+  big_tree
+  ruby $RSYNCNOW -t 30 -q 5 -b 5 src/ dst20.$$ > E20.log 2>&1 & pid=$!
+  sleep 2; kill -TERM $pid; wait $pid; rc=$?
+  sleep 0.5
+  if pgrep -f "dst20\.$$" > /dev/null; then
+    pkill -CONT -f "dst20\.$$"; pkill -f "dst20\.$$"
+    return 1
+  fi
+  [ $rc = 143 ]
+}
+
+# Items without changes, which finder prints with option -ii, are not synced
+E21() {
+  big_tree; rsync -a src/ dst21
+  ruby $RSYNCNOW -v -t 0.2 src/ dst21 -- -a -ii > E21.log 2>&1 && ! grep -q 'running syncer' E21.log
+}
+
 extras="E01:More_files_than_queue_size E02:Nothing_to_do_when_synced E03:Changes_are_synced
   E04:Directory_into_new_DST E05:Verbose_mode E06:Exit_status_of_finder E07:Exit_status_of_syncer
   E08:Help_and_examples E09:No_waiting_when_finder_is_done E10:One_finder_at_a_time
   E11:Two_finders_at_a_time E12:One_finder_per_source_by_default
-  E13:More_deletions_than_queue_size E14:Delete_with_sources_in_same_directory"
+  E13:More_deletions_than_queue_size E14:Delete_with_sources_in_same_directory
+  E15:Delete_keeps_attributes_of_DST E16:Relative_delete_with_sources_in_same_directory
+  E17:Relative_with_more_files_than_queue_size E18:Relative_with_more_deletions_than_queue_size
+  E19:Invalid_arguments E20:No_processes_left_when_terminated E21:Unchanged_items_are_not_synced"
 
 #######################################################################
 # Run the tests:
@@ -469,7 +610,7 @@ wanted() {
   [ -z "$selected" ] || [[ " $selected " == *" $1 "* ]] || [[ " $selected " == *" $2 "* ]]
 }
 
-for cmd in ruby rsync timeout md5sum; do
+for cmd in ruby rsync timeout pgrep; do
   command -v $cmd > /dev/null || { echo "Command $cmd is required for running the tests" >&2; exit 2; }
 done
 

@@ -77,6 +77,8 @@ OPTIONS:
                        if a batch isn't full
   -d, --delete       - Delete files from DST which don't exist in SRC (same
                        as rsync option --delete)
+  -R, --relative     - Sync SRC paths with their full names, instead of just
+                       the last part (same as rsync option --relative)
 
   -r, --rsync rsync  - Name (and/or path) of rsync binary
 
@@ -91,12 +93,12 @@ FIND OPTIONS:
   If specified, overrides all default cmdline options for rsync find processes.
   Default value: -ae=ssh
     NOTE: options `--dry-run --no-relative --out-format='%i %n'` are always
-    added automatically. This also means that option -R can not be used.
+    added automatically. To use rsync option -R, use option -R of rsyncnow.
 
 SYNC OPTIONS:
   If specified, overrides all default cmdline options for rsync sync processes.
-  If you use this, options `-0 --files-from=-` must always remain present.
   Default value: -lptgoD0e=ssh --files-from=-
+    NOTE: options `--from0 --files-from=-` are always added automatically.
     NOTE: options -lptgoD are used explicitly instead just specifying -a
     because -a also includes option -r which should not be present. Recursion
     is controlled via FIND OPTIONS (where it is enabled/implied by -a)
@@ -145,16 +147,26 @@ single files (optionally to a different name), and remote sources or destination
 (`host:path`, `host::module/path` and `rsync://host/module/path`).
 
 Exit status of `rsyncnow` is 0 if all rsync processes were successful. Otherwise
-it is the exit status of the first rsync process that failed.
+it is the exit status of the first rsync process that failed. Invalid arguments
+result in exit status 1. If `rsyncnow` is interrupted or terminated, it also
+terminates the rsync processes which it has started.
 
 Known differences:
 
-- When `SRC` is specified as `dir/`, attributes (modification time, permissions)
-of the top-level directory itself are not synced to `DST`
+- Hard links (rsync option `-H`) are preserved only between the files which get
+synced in the same batch
 - Files are deleted from `DST` only if `rsyncnow` option `--delete` is used (rsync
 option `--delete` in `FIND OPTIONS` or `SYNC OPTIONS` has no effect). See below
 for the differences in how it works.
-- Rsync option `-R` (`--relative`) can not be used
+- Relative paths are used only if `rsyncnow` option `-R` is used (rsync option `-R`
+in `FIND OPTIONS` has no effect)
+
+## Relative paths
+
+With option `-R` (`--relative`), full paths specified as `SRC` are created in `DST`,
+like with rsync option `-R`. For example, `rsyncnow -R /data/dir/ /target` syncs to
+`/target/data/dir/`, and not to `/target/`. The part of `SRC` to leave out can be
+marked with `/./`: `rsyncnow -R /data/./dir/ /target` syncs to `/target/dir/`.
 
 ## Deleting files
 
@@ -173,7 +185,9 @@ supported.
 - If there are multiple `SRC` paths, they must be synced into different directories
 in `DST`. This is not the case if `SRC` ends with `/` (`rsyncnow --delete a/ b/ dst`),
 and `rsyncnow` refuses to run then. The reason is that each `SRC` has its own finder,
-which would delete the files synced from the other `SRC` paths.
+which would delete the files synced from the other `SRC` paths. (With option `-R`
+this applies to `SRC` paths which are relative to different directories, like
+`a/./dir/` and `b/./dir/sub/`.)
 - Limits such as `--max-delete` (in `SYNC OPTIONS`) apply to each batch of paths, and
 not to the whole run.
 

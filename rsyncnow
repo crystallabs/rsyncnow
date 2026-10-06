@@ -24,6 +24,8 @@ OPTIONS:
                        if batch wasn't full
   -d, --delete       - Delete files from DST which don't exist in SRC (same
                        as rsync option --delete)
+  -R, --relative     - Sync SRC paths with their full names, instead of just
+                       the last part (same as rsync option --relative)
 
   -r, --rsync rsync  - Name (and/or path) of rsync binary
 
@@ -38,12 +40,12 @@ FIND OPTIONS:
   If specified, overrides all default cmdline options for rsync find processes.
   Default value: -ae=ssh
     NOTE: options `--dry-run --no-relative --out-format='%i %n'` are always
-    added automatically. This also means that option -R can not be used.
+    added automatically. To use rsync option -R, use option -R of rsyncnow.
 
 SYNC OPTIONS:
   If specified, overrides all default cmdline options for rsync sync processes.
-  If you use this, options `-0 --files-from=-` must always remain present.
   Default value: -lptgoD0e=ssh --files-from=-
+    NOTE: options `--from0 --files-from=-` are always added automatically.
     NOTE: options -lptgoD are used explicitly instead just specifying -a
     because -a also includes option -r which should not be present. Recursion
     is controlled via FIND OPTIONS (where it is enabled/implied by -a)
@@ -77,6 +79,7 @@ $C= {
   timeout: 5.0,
   rsync: 'rsync',
   delete: false,
+  relative: false,
   verbose: false,
   sources: [],
   find_options: %w/-ae=ssh/,
@@ -87,11 +90,39 @@ $C= {
   runtime: {
     status: 0,
     synced: false,
+    changed: false,
   }
 }
 
 $mutex= Mutex.new
 $first= Mutex.new
+
+# An exception in any thread ends the program, as otherwise the other
+# threads could be left waiting for that thread forever
+Thread.abort_on_exception= true
+
+# Process IDs of rsync processes which are currently running
+$children= {}
+
+# If rsyncnow exits while rsync processes are still running (e.g. because it
+# was interrupted), they are terminated. Finders which are paused need to
+# be resumed for that, and would otherwise stay paused forever.
+$pid= Process.pid
+at_exit {
+  if Process.pid== $pid
+    $children.keys.each {|pid|
+      %w/CONT TERM/.each {|signal|
+        begin
+          Process.kill signal, pid
+        rescue Errno::ESRCH
+        end
+      }
+    }
+  end
+}
+%w/INT TERM HUP/.each {|signal|
+  trap(signal) { exit 128+ Signal.list[signal] }
+}
 
 # Arguments are treated as binary data because paths can contain anything
 ARGV.map! &:b
@@ -104,6 +135,7 @@ opts= GetoptLong.new(
   [ '--queuesize', '-q', GetoptLong::REQUIRED_ARGUMENT ],
   [ '--timeout', '-t', GetoptLong::REQUIRED_ARGUMENT ],
   [ '--delete', '-d', GetoptLong::NO_ARGUMENT ],
+  [ '--relative', '-R', GetoptLong::NO_ARGUMENT ],
   [ '--rsync', '-r', GetoptLong::REQUIRED_ARGUMENT ],
   [ '--verbose', '-v', GetoptLong::NO_ARGUMENT ],
   [ '--help', '-h', GetoptLong::NO_ARGUMENT ],
@@ -111,27 +143,34 @@ opts= GetoptLong.new(
 )
 opts.ordering= 2
 
-opts.each do |opt, arg|
-  case opt
-  when '--finders', '--syncers', '--batchsize', '--queuesize'
-    $C[opt[2..].to_sym]= arg.to_i
-  when '--timeout'
-    $C[opt[2..].to_sym]= arg.to_f
-  when '--rsync'
-    $C[:rsync]= arg
-  when '--delete'
-    $C[:delete]= true
-  when '--verbose'
-    $C[:verbose]= true
-  when '--help'
-      puts usage
-      exit 0
-  when '--examples'
-      puts examples
-      exit 0
-  when ''
-    $C[:sources].push arg
+begin
+  opts.each do |opt, arg|
+    case opt
+    when '--finders', '--syncers', '--batchsize', '--queuesize'
+      $C[opt[2..].to_sym]= arg.to_i
+    when '--timeout'
+      $C[opt[2..].to_sym]= arg.to_f
+    when '--rsync'
+      $C[:rsync]= arg
+    when '--delete'
+      $C[:delete]= true
+    when '--relative'
+      $C[:relative]= true
+    when '--verbose'
+      $C[:verbose]= true
+    when '--help'
+        puts usage
+        exit 0
+    when '--examples'
+        puts examples
+        exit 0
+    when ''
+      $C[:sources].push arg
+    end
   end
+rescue GetoptLong::Error
+  # (GetoptLong has already printed the error message)
+  abort "Run #{$0} --help for the list of options"
 end
 
 # See if there are any rsync find options provided
@@ -141,7 +180,9 @@ if ARGV.size> 0
   else
     i = ARGV.size
   end
-  $C[:find_options] = ARGV.shift i
+  # (An empty list, as in "-- -- SYNC OPTIONS", doesn't override the default)
+  options = ARGV.shift i
+  $C[:find_options] = options unless options.empty?
 end
 
 # See if there are any rsync sync options provided
@@ -151,7 +192,8 @@ if ARGV.size> 0
   else
     i = ARGV.size
   end
-  $C[:sync_options] = ARGV.shift i
+  options = ARGV.shift i
+  $C[:sync_options] = options unless options.empty?
 end
 
 #######################################################################
@@ -159,6 +201,10 @@ end
 
 # Last path is always destination, and all others before it are sources
 $C[:destination]= $C[:sources].pop
+
+if $C[:sources].empty?
+  abort usage.lines.first+ "Run #{$0} --help for more information"
+end
 
 # Queue size, if unspecified, defaults to 10 x batchsize
 $C[:queuesize]||= $C[:batchsize]* 10
@@ -168,21 +214,47 @@ $C[:queuesize]||= $C[:batchsize]* 10
 if !$C[:finders] or $C[:finders]> $C[:sources].size
   $C[:finders]= $C[:sources].size
 end
-$C[:finders]= 1 if $C[:finders]< 1
+
+%i/finders syncers batchsize queuesize timeout/.each do |name|
+  abort "Value of option --#{name} must be greater than 0" unless $C[name]> 0
+end
+
+unless system $C[:rsync], '--version', out: File::NULL, err: File::NULL
+  abort "Can't run rsync (#{$C[:rsync]})"
+end
+
+# Syncers always read the paths to sync from STDIN, separated with "\0"
+unless $C[:sync_options].any? {|a| a.start_with? '--files-from' }
+  $C[:sync_options].push '--files-from=-'
+end
+$C[:sync_options].push '--from0'
 
 if $C[:verbose]
   $C[:sync_options].unshift '-v'
+end
+
+if $C[:relative]
+  $C[:find_options_always].map! {|a| a== '--no-relative' ? '--relative' : a }
 end
 
 if $C[:delete]
   $C[:find_options_always].push '--delete'
   # Files in SRC must be able to replace non-empty directories in DST
   $C[:sync_options].push '--force'
-  # Options for rsync processes which delete files. Filter rules for the
-  # paths to delete are read from STDIN, and all other paths are excluded.
+  # Options for rsync processes which delete files. Those processes run
+  # with the same SRC and DST as finders. Filter rules for the paths to
+  # delete are read from STDIN, and all other paths are excluded. Also,
+  # no files are created or updated, so that nothing is done except deleting.
   $C[:delete_options]= $C[:sync_options].reject {|a| a.start_with? '--files-from' }+
-    ['-r', '--delete', '--from0', '--filter=. -', '--exclude=*']
+    ['-r', '--delete', '--from0', '--filter=. -', '--exclude=*', '--existing', '--ignore-existing']
+  $C[:delete_options].push '--relative' if $C[:relative]
 end
+
+# Options for rsync process which syncs the attributes of source directory
+# itself (and nothing else) if its contents are synced, as with "SRC/"
+$C[:top_options]= $C[:sync_options].reject {|a| a.start_with? '--files-from' }+
+  ['--dirs', '--exclude=*']
+$C[:top_options].push '--relative' if $C[:relative]
 
 def v msg; $C[:verbose] and puts msg end
 
@@ -194,8 +266,11 @@ RSYNC_HOST= %r{(?:[^/:@]+@)?(?:\[[^\]]+\]|[^/:]+)}
 # Splits rsync source into the directory that the paths printed by finder
 # are relative to, and the name of the item to sync in that directory.
 # Name is nil if source's contents are synced instead (as with "dir/").
-# Also returns the prefix which needs to be added to paths given to syncer,
-# and the directory to use as SRC when deleting files.
+# Also returns the prefix which needs to be added to paths given to syncer.
+#
+# In relative mode (option -R) the paths are relative to the part of source
+# before "/./" if it contains that, or otherwise to the root directory or
+# the current directory. Name is then the rest of source.
 def split_source source
   daemon= false
   prefix, path= case source
@@ -212,22 +287,33 @@ def split_source source
   end
   path= '.' if path.empty?
 
-  dir, _, name= path.rpartition '/'
-  if name.empty?
-    root, name= path, nil
-  elsif name== '.' or name== '..'
-    root, name= path+ '/', nil
+  if $C[:relative]
+    root, marker, name= path.partition '/./'
+    if marker.empty?
+      root, name= (path.start_with?('/') ? '/' : './'), path
+    else
+      root+= '/'
+    end
+    name= name.sub(%r{\A(\./|/)+}, '').chomp '/'
+    name= '' if name== '.'
   else
-    root= dir.empty? ? './' : dir+ '/'
+    dir, _, name= path.rpartition '/'
+    if name.empty?
+      root, name= path, nil
+    elsif name== '.' or name== '..'
+      root, name= path+ '/', nil
+    else
+      root= dir.empty? ? './' : dir+ '/'
+    end
   end
 
   if daemon and root!= '/'
     # Rsync daemon doesn't find the files from --files-from if source is a
     # directory inside of a module. So module is used as source, and the
     # directory is added to paths (where "/./" marks the part to ignore)
-    [prefix+ '/', name&.b, (root[1..]+ './').b, prefix+ root]
+    [prefix+ '/', name&.b, (root[1..]+ './').b]
   else
-    [prefix+ root, name&.b, '', prefix+ root]
+    [prefix+ root, name&.b, '']
   end
 end
 
@@ -249,15 +335,24 @@ end
 def parse_line l
   l= l.b.chomp "\n"
   return unless l=~ /\A(?:[<>ch.]([fdLDS]).{9}|(\*)deleting  ) (.+)\z/mn
+  # Items without any changes are printed if finder is more verbose (-ii)
+  return if l.start_with? '.' and l[2, 9].strip.empty?
   type= $1|| $2
   # Undo rsync's escaping of unprintable characters (e.g. newline is \#012)
   path= $3.gsub(/\\#(\d{3})/n) { $1.oct.chr }
 
+  # In relative mode, absolute local paths are printed with the leading "/"
+  if $C[:relative]
+    path= path.sub %r{\A/}n, ''
+    return if path.empty?
+  end
+
   # Paths to delete are returned as they are (directories end with "/")
   return [type, path] if type== '*'
 
-  # Source directory itself can't be synced without also listing its contents
-  return if path== './'
+  # Source directory itself can't be synced without also listing its contents,
+  # so no path is returned. (Its attributes are synced separately at the end.)
+  return [type] if path== './'
 
   # Same goes for other directories if they are specified with a trailing "/"
   [type, path.chomp('/')]
@@ -292,6 +387,15 @@ def check status
   }
 end
 
+# Runs rsync process and waits for it to finish
+def run cmdline
+  pid= spawn *cmdline
+  $children[pid]= true
+  Process.wait pid
+  $children.delete pid
+  check $?
+end
+
 # Sends a signal to finder process. Does nothing if finder has already
 # exited, which is normal (its output may still be waiting to be read).
 def signal_finder thread, signal
@@ -322,7 +426,7 @@ class Finder
       queue= Queue.new
       queues= [queue]
       threads= []
-      root, name, prefix, dir= split_source source
+      root, name, prefix= split_source source
       cmdline= [cmd, args, $C[:find_options_always], source, dest].flatten
       v "Starting finder: %s" % [cmdline]
       $C[:syncers].times do |i|
@@ -331,24 +435,29 @@ class Finder
       if $C[:delete]
         # Paths to delete have a separate queue, and a syncer which deletes them
         queues<< deletes= Queue.new
-        threads<< Thread.new { Syncer.new deletes, $C[:rsync], $C[:delete_options], dir, dir_dest(dest) }
+        threads<< Thread.new { Syncer.new deletes, $C[:rsync], $C[:delete_options], source, dest }
       end
 
       Open3.popen2(*cmdline) {|i,o,t|
+        $children[t.pid]= true
         o.each_line do |l|
           type, path= parse_line l
+
+          # Anything found by finder means that DST is going to change
+          $C[:runtime][:changed]= true if type
 
           if path
             if type== '*'
               deletes<< delete_rules(path) if deletes
-            elsif type!= 'd' and path== name and $C[:sources].size== 1
+            elsif type!= 'd' and path== name and $C[:sources].size== 1 and !$C[:relative]
               # A single file is synced by running rsync on it directly,
               # because in that case DST can also be the new name of the file
               direct= [cmd, $C[:sync_options].reject {|a| a.start_with? '--files-from' }, source, dest].flatten
               v "Running syncer for a single file: %s" % [direct]
-              system *direct
-              check $?
+              run direct
             else
+              # Rsync ignores the paths which start with "#" or ";" (as comments)
+              path= './'+ path if prefix.empty? and path=~ /\A[#;]/n
               queue<< prefix+ path
             end
           end
@@ -362,6 +471,7 @@ class Finder
             signal_finder t, 'CONT'
           end
         end
+        $children.delete t.pid
         check t.value
       }
 
@@ -418,10 +528,16 @@ class Syncer
             STDIN.reopen read_io
             exec *cmdline
           end
+          $children[child]= true
           read_io.close
-          write_io.write list.join "\0"
-          write_io.close
+          begin
+            write_io.write list.join "\0"
+            write_io.close
+          rescue Errno::EPIPE
+            # Rsync has exited without reading the paths; its exit status tells why
+          end
           Process.wait child
+          $children.delete child
           check $?
         end
       end
@@ -441,9 +557,21 @@ v "Config: #{$C}"
 # which don't exist in its SRC. So they must not be syncing into the same
 # directory, which is the case if contents of a directory are synced ("SRC/").
 if $C[:delete] and $C[:sources].size> 1
-  names= $C[:sources].map {|source| split_source(source)[1] }
-  if names.include? nil or names.uniq!
-    abort 'Option --delete can be used with multiple SRC paths only if they are synced into different directories in DST (which is not the case if SRC ends with "/")'
+  sources= $C[:sources].map {|source| split_source source }
+  if $C[:relative]
+    # In relative mode that is only a problem if sources are relative to
+    # different directories, and one is synced into the directory of another
+    conflict= sources.combination(2).any? {|(root1, name1), (root2, name2)|
+      root1!= root2 and (name1.empty? or name2.empty? or
+        (name1+ '/').start_with?(name2+ '/') or (name2+ '/').start_with?(name1+ '/'))
+    }
+  else
+    names= sources.map {|root, name| name }
+    conflict= (names.include? nil or names.uniq!)
+  end
+  if conflict
+    abort 'Option --delete can be used with multiple SRC paths only if they are synced into different directories in DST'+
+      ($C[:relative] ? '' : ' (which is not the case if SRC ends with "/")')
   end
 end
 
@@ -456,5 +584,19 @@ $C[:finders].times do |i|
   threads<< Thread.new { Finder.new $C[:rsync], $C[:find_options], sources, $C[:destination] }
 end
 threads.each &:join
+
+# If contents of a directory are synced (as with "SRC/"), DST gets the
+# attributes of that directory. They can only be synced at the end, because
+# modification time of DST changes while files are synced into it. If there
+# are multiple such sources, rsync uses the attributes of the first one.
+top= $C[:sources].find {|source|
+  name= split_source(source)[1]
+  name.nil? or name.empty?
+}
+if top and $C[:runtime][:changed]
+  cmdline= [$C[:rsync], $C[:top_options], top, $C[:destination]].flatten
+  v "Syncing attributes of %s: %s" % [top, cmdline]
+  run cmdline
+end
 
 exit $C[:runtime][:status]
