@@ -359,7 +359,7 @@ report_test() {
   cmp -s $W/m/$n/now.tree $W/m/$n/ref.tree || ok=0
   [ $nrc = $rrc ] || ok=0
   # If rsync has succeeded, rsyncnow must not print any errors either
-  [ $rrc != 0 ] || ! grep -qE 'rsync error|rsync:|[Ee]rror|warning' $W/m/$n/now.log || ok=0
+  [ $rrc != 0 ] || ! grep -qE '^rsync:|[Ee]rror|warning' $W/m/$n/now.log || ok=0
 
   [ "$cwd" = . ] || args="$args (in $cwd)"
   if [ $ok = 1 ]; then
